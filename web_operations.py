@@ -1,147 +1,73 @@
 from dotenv import load_dotenv
 import os
 import requests
-from urllib.parse import quote_plus
-from snapshot_operations import download_snapshot, poll_snapshot_status
 
 load_dotenv()
 
-dataset_id = "gd_lvz8ah06191smkebj4"
-
-def _make_api_request(url, **kwargs):
-    api_key = os.getenv("BRIGHTDATA_API_KEY")
+def serp_search(query: str, engine: str = "google") -> str:
+    """
+    Searches the web using the Firecrawl API.
+    Returns a formatted string containing high-quality markdown snippets.
+    """
+    api_key = os.getenv("FIRECRAWL_API_KEY")
+    if not api_key:
+        return "Error: FIRECRAWL_API_KEY is not set in the environment."
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
-    try:
-        response = requests.post(url, headers=headers, **kwargs)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        print(f"API request failed: {e}")
-        return None
-    except Exception as e:
-        print(f"Unknown error: {e}")
-        return None
-
-
-def serp_search(query, engine="google"):
-    if engine == "google":
-        base_url = "https://www.google.com/search"
-    elif engine == "bing":
-        base_url = "https://www.bing.com/search"
-    else:
-        raise ValueError(f"Unknown engine {engine}")
-
-    url = "https://api.brightdata.com/request"
-
     payload = {
-        "zone": "ai_agent2",
-        "url": f"{base_url}?q={quote_plus(query)}&brd_json=1",
-        "format": "raw"
+        "query": query,
+        "limit": 5,
+        "scrapeOptions": {
+            "formats": ["markdown"],
+            "onlyMainContent": True
+        }
     }
 
-    full_response = _make_api_request(url, json=payload)
-    if not full_response:
-        return None
+    try:
+        response = requests.post(
+            "https://api.firecrawl.dev/v2/search",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        res_data = response.json()
 
-    extracted_data = {
-        "knowledge": full_response.get("knowledge", {}),
-        "organic": full_response.get("organic", []),
-    }
-    return extracted_data
+        if not res_data.get("success"):
+            return f"Error: Firecrawl search was unsuccessful: {res_data}"
 
+        data_obj = res_data.get("data", {})
+        results = []
+        if isinstance(data_obj, list):
+            results = data_obj
+        elif isinstance(data_obj, dict):
+            results = data_obj.get("web", [])
 
-def _trigger_and_download_snapshot(trigger_url, params, data, operation_name="operation"):
-    trigger_result = _make_api_request(trigger_url, params=params, json=data)
-    if not trigger_result:
-        return None
+        formatted_results = []
 
-    snapshot_id = trigger_result.get("snapshot_id")
-    if not snapshot_id:
-        return None
+        for idx, item in enumerate(results, 1):
+            title = item.get("title", "No Title")
+            url = item.get("url", "No URL")
+            description = item.get("description", "")
+            markdown = item.get("markdown", "")
+            
+            # Truncate markdown snippet to preserve token context window
+            snippet = markdown[:1200] + "..." if len(markdown) > 1200 else markdown
+            
+            formatted_results.append(
+                f"Result {idx}:\n"
+                f"Title: {title}\n"
+                f"URL: {url}\n"
+                f"Description: {description}\n"
+                f"Content:\n{snippet}\n"
+                f"{'-'*40}"
+            )
 
-    if not poll_snapshot_status(snapshot_id):
-        return None
+        return "\n\n".join(formatted_results)
 
-    raw_data = download_snapshot(snapshot_id)
-    return raw_data
-
-
-def reddit_search_api(keyword, date="All time", sort_by="Hot", num_of_posts=75):
-    trigger_url = "https://api.brightdata.com/datasets/v3/trigger"
-
-    params = {
-        "dataset_id": "gd_lvz8ah06191smkebj4",
-        "include_errors": "true",
-        "type": "discover_new",
-        "discover_by": "keyword"
-    }
-
-    data = [
-        {
-            "keyword": keyword,
-            "date": date,
-            "sort_by": sort_by,
-            "num_of_posts": num_of_posts,
-        }
-    ]
-
-    raw_data = _trigger_and_download_snapshot(
-        trigger_url, params, data, operation_name="reddit"
-    )
-
-    if not raw_data:
-        return None
-
-    parsed_data = []
-    for post in raw_data:
-        parsed_post = {
-            "title": post.get("title"),
-            "url": post.get("url")
-        }
-        parsed_data.append(parsed_post)
-
-    return {"parsed_posts": parsed_data, "total_found": len(parsed_data)}
-
-
-def reddit_post_retrieval(urls, days_back=10, load_all_replies=False, comment_limit=""):
-    if not urls:
-        return None
-
-    trigger_url = "https://api.brightdata.com/datasets/v3/trigger"
-
-    params = {
-        "dataset_id": "gd_lvzdpsdlw09j6t702",
-        "include_errors": "true"
-    }
-
-    data = [
-        {
-            "url": url,
-            "days_back": days_back,
-            "load_all_replies": load_all_replies,
-            "comment_limit": comment_limit
-        }
-        for url in urls
-    ]
-
-    raw_data = _trigger_and_download_snapshot(
-        trigger_url, params, data, operation_name="reddit comments"
-    )
-    if not raw_data:
-        return None
-
-    parsed_comments = []
-    for comment in raw_data:
-        parsed_comment = {
-            "comment_id": comment.get("comment_id"),
-            "content": comment.get("comment"),
-            "date": comment.get("date_posted"),
-        }
-        parsed_comments.append(parsed_comment)
-
-    return {"comments": parsed_comments, "total_retrieved": len(parsed_comments)}
+    except Exception as e:
+        return f"Error executing Firecrawl search: {e}"
